@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "pdm2pcm.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -43,13 +44,27 @@
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+CRC_HandleTypeDef hcrc;
+
 I2C_HandleTypeDef hi2c1;
 
 I2S_HandleTypeDef hi2s2;
 I2S_HandleTypeDef hi2s3;
+DMA_HandleTypeDef hdma_spi2_rx;
+DMA_HandleTypeDef hdma_spi3_tx;
 
 /* USER CODE BEGIN PV */
+uint16_t txBuf[128];
+uint16_t pdmRxBuf[128];
+uint16_t MidBuffer[16];
+uint8_t txstate = 0;
+uint8_t rxstate = 0;
 
+
+uint16_t fifobuf[256];
+uint8_t fifo_w_ptr = 0;
+uint8_t fifo_r_ptr = 0;
+uint8_t fifo_read_enabled = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -60,8 +75,18 @@ static void MX_ADC1_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2S2_Init(void);
 static void MX_I2S3_Init(void);
+static void MX_CRC_Init(void);
 /* USER CODE BEGIN PFP */
+void FifoWrite(uint16_t data) {
+	fifobuf[fifo_w_ptr] = data;
+	fifo_w_ptr++;
+}
 
+uint16_t FifoRead() {
+	uint16_t val = fifobuf[fifo_r_ptr];
+	fifo_r_ptr++;
+	return val;
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -102,14 +127,54 @@ int main(void)
   MX_I2C1_Init();
   MX_I2S2_Init();
   MX_I2S3_Init();
+  MX_CRC_Init();
+  MX_PDM2PCM_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_I2S_Transmit_DMA(&hi2s3, &txBuf[0], 64);
+  HAL_I2S_Receive_DMA(&hi2s2, &pdmRxBuf[0],64);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  if (rxstate==1) {
+	      	PDM_Filter(&pdmRxBuf[0],&MidBuffer[0], &PDM1_filter_handler);
+	      	for (int i=0; i<16;i++) { FifoWrite(MidBuffer[i]); }
+	      	if (fifo_w_ptr-fifo_r_ptr > 128) fifo_read_enabled=1;
+	      	rxstate=0;
+
+	      }
+
+	      if (rxstate==2) {
+	      	PDM_Filter(&pdmRxBuf[64],&MidBuffer[0], &PDM1_filter_handler);
+	      	for (int i=0; i<16;i++) { FifoWrite(MidBuffer[i]); }
+	      	rxstate=0;
+
+	      }
+
+	      if (txstate==1) {
+	      	if (fifo_read_enabled==1) {
+	  			for (int i=0; i<64;i=i+4) {
+	  				uint16_t data = FifoRead();
+	  				txBuf[i] = data;
+	  				txBuf[i+2] = data;
+	  			}
+	      	}
+	      	txstate=0;
+	      }
+
+	      if (txstate==2) {
+	      	if (fifo_read_enabled==1) {
+	  			for (int i=64; i<128;i=i+4) {
+	  				uint16_t data = FifoRead();
+	  				txBuf[i] = data;
+	  				txBuf[i+2] = data;
+	  			}
+
+	  		}
+	      	txstate=0;
+	      }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -121,6 +186,23 @@ int main(void)
   * @brief System Clock Configuration
   * @retval None
   */
+
+void HAL_I2S_TxHalfCpltCallback (I2S_HandleTypeDef *hi2s) {
+	txstate = 1;
+}
+
+void HAL_I2S_TxCpltCallback (I2S_HandleTypeDef *hi2s) {
+	txstate = 2;
+}
+
+void HAL_I2S_RxHalfCpltCallback (I2S_HandleTypeDef *hi2s) {
+	rxstate = 1;
+}
+
+void HAL_I2S_RxCpltCallback (I2S_HandleTypeDef *hi2s) {
+	rxstate = 2;
+}
+
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -228,6 +310,33 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief CRC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CRC_Init(void)
+{
+
+  /* USER CODE BEGIN CRC_Init 0 */
+
+  /* USER CODE END CRC_Init 0 */
+
+  /* USER CODE BEGIN CRC_Init 1 */
+
+  /* USER CODE END CRC_Init 1 */
+  hcrc.Instance = CRC;
+  if (HAL_CRC_Init(&hcrc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  __HAL_CRC_DR_RESET(&hcrc);
+  /* USER CODE BEGIN CRC_Init 2 */
+
+  /* USER CODE END CRC_Init 2 */
+
+}
+
+/**
   * @brief I2C1 Initialization Function
   * @param None
   * @retval None
@@ -277,10 +386,10 @@ static void MX_I2S2_Init(void)
 
   /* USER CODE END I2S2_Init 1 */
   hi2s2.Instance = SPI2;
-  hi2s2.Init.Mode = I2S_MODE_MASTER_TX;
-  hi2s2.Init.Standard = I2S_STANDARD_PHILIPS;
-  hi2s2.Init.DataFormat = I2S_DATAFORMAT_16B;
-  hi2s2.Init.MCLKOutput = I2S_MCLKOUTPUT_ENABLE;
+  hi2s2.Init.Mode = I2S_MODE_SLAVE_RX;
+  hi2s2.Init.Standard = I2S_STANDARD_MSB;
+  hi2s2.Init.DataFormat = I2S_DATAFORMAT_24B;
+  hi2s2.Init.MCLKOutput = I2S_MCLKOUTPUT_DISABLE;
   hi2s2.Init.AudioFreq = I2S_AUDIOFREQ_44K;
   hi2s2.Init.CPOL = I2S_CPOL_LOW;
   hi2s2.Init.ClockSource = I2S_CLOCK_PLL;
@@ -313,7 +422,7 @@ static void MX_I2S3_Init(void)
   hi2s3.Instance = SPI3;
   hi2s3.Init.Mode = I2S_MODE_MASTER_TX;
   hi2s3.Init.Standard = I2S_STANDARD_PHILIPS;
-  hi2s3.Init.DataFormat = I2S_DATAFORMAT_16B;
+  hi2s3.Init.DataFormat = I2S_DATAFORMAT_24B;
   hi2s3.Init.MCLKOutput = I2S_MCLKOUTPUT_ENABLE;
   hi2s3.Init.AudioFreq = I2S_AUDIOFREQ_44K;
   hi2s3.Init.CPOL = I2S_CPOL_LOW;
@@ -337,8 +446,15 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
@@ -355,8 +471,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
@@ -408,14 +524,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PC9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_9;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
 }
 
